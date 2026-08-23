@@ -42,3 +42,13 @@ htmlcov/
 .codegraph
 /docs/superpowers
 .understand-anything
+
+# Turbo Video reproducible build outputs
+desktop/build/final/
+desktop/build/pyinstaller-work/
+desktop/build/pyinstaller-spec/
+desktop/build/TurboVideoFeasibility.app/
+desktop/dist/
+desktop/vendor/
+desktop/build/packaged-smoke-output/
+desktop/build/package-visual-smoke.png

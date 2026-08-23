@@ -20,12 +20,15 @@ def _widget_by_key(elements, key):
     )
 
 
-def _new_app():
+def _new_app(workflow_mode="Advanced Mode"):
     # A cold Python 3.11 environment can spend over 30 seconds importing the
     # full Streamlit entrypoint and optional media stack. Keep the assertion
     # timeout above that one-time startup cost so targeted runs do not flake.
     app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
     app.session_state["ui_language"] = "en"
+    # These regression tests exercise legacy controls. The product default is
+    # Simple Mode; explicitly select Advanced Mode for this legacy suite.
+    app.session_state["workflow_mode"] = workflow_mode
     app.run()
     assert [str(item.value) for item in app.exception] == []
     return app
@@ -326,6 +329,7 @@ def test_invalid_saved_generation_settings_fall_back_without_breaking_webui():
     assert _widget_by_key(app.selectbox, "voice_rate_select").value == 1.0
     assert _widget_by_key(app.selectbox, "bgm_type_select").value == "random"
     assert _widget_by_key(app.selectbox, "bgm_volume_select").value == 0.2
+    assert _widget_by_key(app.checkbox, "rh_essendon_branding_checkbox").value is True
     assert _widget_by_key(app.checkbox, "subtitle_enabled_checkbox").value is False
     assert _widget_by_key(app.color_picker, "stroke_color_picker").value == "#000000"
     assert _widget_by_key(app.slider, "stroke_width_slider").value == 1.5

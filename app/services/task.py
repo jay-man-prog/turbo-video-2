@@ -20,6 +20,7 @@ from app.services import (
     llm,
     loomloom,
     material,
+    rh_essendon,
     sonilo,
     subtitle,
     task_artifacts,
@@ -302,7 +303,15 @@ def generate_script(task_id, params):
 def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
-    if not video_terms:
+    if getattr(params, "rh_essendon_simple_mode", False):
+        plan = params.rh_visual_plan or rh_essendon.generate_semantic_visual_plan(
+            video_script, params.rh_content_type, params.rh_target_seconds
+        )
+        params.rh_visual_plan = plan
+        video_terms = plan
+        params.rh_visual_beat_durations = [float(beat.get("duration", 3)) for beat in plan]
+        logger.info(f"planned {len(plan)} R&H Essendon visual beats")
+    elif not video_terms:
         # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
         # 否则后续即使顺序下载和顺序拼接，也只能复用一组全局主题词，
         # 无法改善“后面内容的画面提前出现”的问题。
@@ -493,6 +502,7 @@ def generate_audio(task_id, params, video_script, voice_preview=None):
             voice_name=voice.parse_voice_name(params.voice_name),
             voice_rate=params.voice_rate,
             voice_file=audio_file,
+            elevenlabs_voice_settings=getattr(params, "rh_elevenlabs_voice_settings", None),
         )
         if sub_maker is None:
             _mark_task_failed(
@@ -733,6 +743,10 @@ def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
 ):
     final_video_paths = []
+    if getattr(params, "rh_essendon_simple_mode", False) and params.rh_visual_plan:
+        params.rh_visual_beat_durations = rh_essendon.allocate_beat_durations(
+            params.rh_visual_plan, audio_duration
+        )
     combined_video_paths = []
     warnings = []
     video_music_provider = _VIDEO_MUSIC_PROVIDERS.get(params.bgm_type)
@@ -767,6 +781,11 @@ def generate_final_videos(
             max_clip_duration=params.video_clip_duration,
             threads=params.n_threads,
             clip_speed=params.video_clip_speed,
+            planned_clip_durations=(
+                params.rh_visual_beat_durations
+                if getattr(params, "rh_essendon_simple_mode", False)
+                else None
+            ),
         )
 
         _progress += 50 / params.video_count / 2
@@ -1212,6 +1231,16 @@ def _run_pipeline(
                 return _mark_task_failed(task_id, "preflight", str(exc))
 
     # 1. Generate script
+    if getattr(params, "rh_essendon_branding", False) and getattr(params, "rh_background_music_enabled", False) and not getattr(params, "rh_background_music_filename", ""):
+        selected, warning = rh_essendon.select_music_track(task_id)
+        params.rh_background_music_filename = selected
+        params.rh_background_music_warning = warning
+        params.bgm_type = "custom" if selected else ""
+        params.bgm_file = selected
+        if selected:
+            logger.info(f"R&H background music selected: {selected}")
+        elif warning:
+            logger.warning(warning)
     video_script = generate_script(task_id, params)
     if not video_script or "Error: " in video_script:
         error = (
@@ -1240,7 +1269,31 @@ def _run_pipeline(
                 "failed to generate video search terms",
             )
 
+    if getattr(params, "rh_essendon_branding", False):
+        rh_final_contact_card = video.rh_essendon_contact_card_type(
+            getattr(params, "rh_final_contact_card", None)
+        )
+        params.rh_final_contact_card = rh_final_contact_card
+        logger.info(f"R&H final contact card: {rh_final_contact_card}")
+
+    # Save the canonical card identifier with the task parameters themselves.
+    # A retry or restored task therefore never depends on the current page UI.
     save_script_data(task_id, video_script, video_terms, params)
+    if getattr(params, "rh_essendon_branding", False):
+        task_artifacts.patch_script_data(
+            task_id,
+            rh_final_contact_card=rh_final_contact_card,
+            rh_background_music={
+                "enabled": bool(getattr(params, "rh_background_music_enabled", False)),
+                "filename": getattr(params, "rh_background_music_filename", ""),
+                "source": "resource/songs",
+                "warning": getattr(params, "rh_background_music_warning", ""),
+                "level": getattr(params, "bgm_volume", 0),
+                "fade_in_seconds": 0.9,
+                "fade_out_seconds": 2.0,
+                "ducking_db": 5,
+            },
+        )
 
     if stop_at == "terms":
         sm.state.update_task(

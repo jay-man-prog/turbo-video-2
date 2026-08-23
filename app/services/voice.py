@@ -411,12 +411,41 @@ def generate_silent_audio(duration_seconds: float, output_file: str) -> bool:
     return True
 
 
+def apply_pitch_preserving_speed(audio_file: str, speed: float) -> bool:
+    """Apply one FFmpeg ``atempo`` pass without changing pitch or sample rate."""
+    try:
+        speed = float(speed)
+    except (TypeError, ValueError):
+        return False
+    if abs(speed - 1.0) < 0.001:
+        return True
+    # atempo supports 0.5–2.0; the Simple Mode 1.10× rate is safely inside.
+    speed = max(0.5, min(2.0, speed))
+    root, extension = os.path.splitext(audio_file)
+    temporary_file = f"{root}.tempo{extension or '.mp3'}"
+    command = [
+        utils.get_ffmpeg_binary(), "-y", "-i", audio_file,
+        "-filter:a", f"atempo={speed:.2f}", "-c:a", "libmp3lame", temporary_file,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0 or not os.path.isfile(temporary_file):
+        logger.warning("failed to apply pitch-preserving ElevenLabs tempo adjustment")
+        try:
+            os.remove(temporary_file)
+        except OSError:
+            pass
+        return False
+    os.replace(temporary_file, audio_file)
+    return True
+
+
 def tts(
     text: str,
     voice_name: str,
     voice_rate: float,
     voice_file: str,
     voice_volume: float = 1.0,
+    elevenlabs_voice_settings: dict | None = None,
 ) -> Union[SubMaker, None]:
     if is_no_voice(voice_name):
         duration_seconds = estimate_no_voice_duration(text)
@@ -486,7 +515,7 @@ def tts(
         parts = voice_name.split(":")
         if len(parts) >= 2:
             voice_id = parts[1]
-            return elevenlabs_tts(text, voice_id, voice_file, voice_rate, voice_volume)
+            return elevenlabs_tts(text, voice_id, voice_file, voice_rate, voice_volume, voice_settings=elevenlabs_voice_settings)
         else:
             logger.error(f"Invalid elevenlabs voice name format: {voice_name}")
             return None
@@ -1573,6 +1602,7 @@ def elevenlabs_tts(
     voice_rate: float = 1.0,
     voice_volume: float = 1.0,
     model_id: str = "",
+    voice_settings: dict | None = None,
 ) -> Union[SubMaker, None]:
     text = (text or "").strip()
     if not text:
@@ -1592,15 +1622,19 @@ def elevenlabs_tts(
         "xi-api-key": api_key,
         "Content-Type": "application/json",
     }
+    safe_voice_settings = {"stability": 0.5, "similarity_boost": 0.75, "style": 0.0, "use_speaker_boost": True}
+    if isinstance(voice_settings, dict):
+        for key in ("stability", "similarity_boost", "style"):
+            try:
+                safe_voice_settings[key] = max(0.0, min(1.0, float(voice_settings.get(key, safe_voice_settings[key]))))
+            except (TypeError, ValueError):
+                pass
+        if "use_speaker_boost" in voice_settings:
+            safe_voice_settings["use_speaker_boost"] = bool(voice_settings["use_speaker_boost"])
     payload = {
         "text": text,
         "model_id": model_id,
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75,
-            "style": 0.0,
-            "use_speaker_boost": True,
-        },
+        "voice_settings": safe_voice_settings,
     }
 
     # Errors where retrying will never help (auth/access/validation failures).
@@ -1637,6 +1671,12 @@ def elevenlabs_tts(
 
             with open(voice_file, "wb") as f:
                 f.write(response.content)
+
+            # ElevenLabs' installed endpoint accepts no speed field. Apply this
+            # single pitch-preserving pass locally instead of pretending that
+            # voice_rate was honoured by the remote service.
+            if not apply_pitch_preserving_speed(voice_file, voice_rate):
+                logger.warning("keeping original ElevenLabs rate after tempo adjustment failed")
 
             audio_clip = AudioFileClip(voice_file)
             audio_duration = audio_clip.duration

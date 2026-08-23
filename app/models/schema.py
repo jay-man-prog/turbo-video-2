@@ -113,6 +113,24 @@ class VideoParams(BaseModel):
     text_fore_color: Optional[str] = "#FFFFFF"
     text_background_color: Union[bool, str] = False
     rounded_subtitle_background: bool = False
+    # Raine & Horne Essendon portrait exports receive a self-contained visual
+    # treatment in the final render stage. Landscape and square exports bypass it.
+    rh_essendon_branding: bool = True
+    # Simple Mode still uses the standard pipeline; these fields only carry its
+    # local planning choices into the task worker.
+    rh_essendon_simple_mode: bool = False
+    rh_content_type: str = "General Property Advice"
+    rh_target_seconds: int = 20
+    rh_extra_facts: str = ""
+    rh_visual_beat_durations: Optional[List[float]] = None
+    rh_visual_plan: Optional[List[dict]] = None
+    rh_elevenlabs_voice_settings: Optional[dict] = None
+    rh_background_music_enabled: bool = True
+    rh_background_music_filename: str = ""
+    rh_background_music_warning: str = ""
+    # This is deliberately an identifier rather than display text so a task
+    # keeps the same closing treatment after Streamlit reruns or retries.
+    rh_final_contact_card: str = "jayden_manno"
 
     font_size: int = 60
     stroke_color: Optional[str] = "#000000"

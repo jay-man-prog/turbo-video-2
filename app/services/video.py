@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unicodedata
 from contextlib import ExitStack, redirect_stdout
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import List
 from loguru import logger
@@ -89,6 +90,97 @@ _SUPPORTED_VIDEO_CODECS = (
     "h264_videotoolbox",
 )
 _runtime_disabled_video_codecs = set()
+
+_RH_GOLD = "#FFB300"
+_RH_CHARCOAL = "#2B2B2B"
+_RH_WHITE = "#FFFFFF"
+_RH_BRAND_CONTACT = (
+    "Jayden Manno",
+    "Director and Auctioneer",
+    "0421 736 736",
+    "Raine & Horne Essendon",
+)
+RH_CONTACT_CARD_JAYDEN = "jayden_manno"
+RH_CONTACT_CARD_OFFICE = "rh_essendon_office"
+
+
+def rh_essendon_contact_card_type(value: str | None) -> str:
+    """Return the persisted R&H closing-card identifier, safely defaulting old tasks."""
+    if value == RH_CONTACT_CARD_OFFICE:
+        return RH_CONTACT_CARD_OFFICE
+    return RH_CONTACT_CARD_JAYDEN
+
+
+def rh_essendon_contact_card_content(value: str | None) -> tuple[str, ...]:
+    """Visible copy for one of the two approved R&H final contact cards."""
+    if rh_essendon_contact_card_type(value) == RH_CONTACT_CARD_OFFICE:
+        return ("Raine & Horne Essendon", "(03) 9374 1111")
+    return _RH_BRAND_CONTACT
+
+
+@dataclass(frozen=True)
+class RHBrandingAssets:
+    opening: str
+    watermark: str
+    closing: str
+    headline_font: str
+    secondary_font: str
+    subtitle_font: str
+
+
+def rh_essendon_branding_assets() -> RHBrandingAssets:
+    """Return the fixed, local-only assets used by the portrait brand layer."""
+    branding_dir = utils.resource_dir("branding")
+    fonts_dir = utils.font_dir()
+    return RHBrandingAssets(
+        opening=os.path.join(branding_dir, "Ampersand animation_without bg.mov"),
+        watermark=os.path.join(branding_dir, "Ampersand-Gold-RGB.png"),
+        closing=os.path.join(branding_dir, "R&H_Charcoal 1080 x 1920 portrait.mp4"),
+        headline_font=os.path.join(fonts_dir, "Raine&Horne-Thin.ttf"),
+        secondary_font=os.path.join(fonts_dir, "Raine&HorneLight.ttf"),
+        subtitle_font=os.path.join(fonts_dir, "Raine&HorneRegular.ttf"),
+    )
+
+
+def should_apply_rh_essendon_branding(params: VideoParams) -> bool:
+    """Brand only enabled portrait renders; never stretch portrait assets."""
+    if not getattr(params, "rh_essendon_branding", True):
+        return False
+    try:
+        return VideoAspect(params.video_aspect) == VideoAspect.portrait
+    except (TypeError, ValueError):
+        return False
+
+
+def _rh_essendon_assets_are_available(assets: RHBrandingAssets) -> bool:
+    return all(
+        os.path.isfile(asset)
+        for asset in (
+            assets.opening,
+            assets.watermark,
+            assets.closing,
+            assets.headline_font,
+            assets.secondary_font,
+            assets.subtitle_font,
+        )
+    )
+
+
+def rh_essendon_subtitle_params(
+    params: VideoParams, assets: RHBrandingAssets
+) -> VideoParams:
+    """Return the fixed, mobile-readable subtitle treatment for branded video."""
+    return params.model_copy(
+        update={
+            "font_name": os.path.basename(assets.subtitle_font),
+            "text_fore_color": _RH_WHITE,
+            "text_background_color": _RH_CHARCOAL,
+            "rounded_subtitle_background": True,
+            "stroke_color": _RH_CHARCOAL,
+            "stroke_width": 0,
+            "font_size": max(58, int(params.font_size)),
+        }
+    )
 
 
 def _get_required_video_duration(audio_duration: float) -> float:
@@ -420,7 +512,9 @@ def _open_image_clip_with_fallback(image_path: str):
         return ImageClip(sanitized_path), sanitized_path
 
 
-def _open_video_clip_quietly(video_path: str, audio: bool = False) -> VideoFileClip:
+def _open_video_clip_quietly(
+    video_path: str, audio: bool = False, has_mask: bool = False
+) -> VideoFileClip:
     """
     安静地打开视频文件，避免 MoviePy 2.1.x 把 ffmpeg 探测信息直接打印到 stdout。
 
@@ -438,7 +532,7 @@ def _open_video_clip_quietly(video_path: str, audio: bool = False) -> VideoFileC
     """
     captured_stdout = io.StringIO()
     with redirect_stdout(captured_stdout):
-        clip = VideoFileClip(video_path, audio=audio)
+        clip = VideoFileClip(video_path, audio=audio, has_mask=has_mask)
 
     moviepy_stdout = captured_stdout.getvalue().strip()
     if moviepy_stdout:
@@ -545,6 +639,7 @@ def combine_videos(
     max_clip_duration: int = 5,
     threads: int = 2,
     clip_speed: float = 1.0,
+    planned_clip_durations: List[float] | None = None,
 ) -> str:
     audio_clip = AudioFileClip(audio_file)
     try:
@@ -582,7 +677,7 @@ def combine_videos(
     processed_clips = []
     subclipped_items = []
     video_duration = 0
-    for video_path in video_paths:
+    for source_index, video_path in enumerate(video_paths):
         clip = _open_video_clip_quietly(video_path)
         clip_duration = clip.duration
         clip_w, clip_h = clip.size
@@ -590,8 +685,17 @@ def combine_videos(
         
         start_time = 0
 
+        planned_duration = (
+            planned_clip_durations[source_index]
+            if planned_clip_durations and source_index < len(planned_clip_durations)
+            else max_clip_duration
+        )
+        # Semantic beats are paced against the finished narration. They may be
+        # longer than the old fixed four-second cap, but remain bounded so a
+        # single stock shot never becomes static.
+        source_duration_for_path = max(2.0, min(8.0, float(planned_duration))) * normalized_clip_speed
         while start_time < clip_duration:
-            end_time = min(start_time + source_clip_duration, clip_duration)
+            end_time = min(start_time + source_duration_for_path, clip_duration)
 
             # 保留所有有效分段。
             # 这样既不会丢掉“整段视频本身就短于 max_clip_duration”的素材，
@@ -659,9 +763,20 @@ def combine_videos(
                     new_width = int(clip_w * scale_factor)
                     new_height = int(clip_h * scale_factor)
 
-                    background = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(clip_duration)
-                    clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
-                    clip = CompositeVideoClip([background, clip_resized])
+                    # Fill the portrait canvas, then crop centrally.  Passing an
+                    # explicit output size is essential: without it MoviePy may
+                    # retain the stock clip's 480x848-sized composite canvas.
+                    clip_resized = clip.resized(new_size=(new_width, new_height))
+                    crop_x = max(0, int((new_width - video_width) / 2))
+                    crop_y = max(0, int((new_height - video_height) / 2))
+                    clip = clip_resized.cropped(
+                        x1=crop_x,
+                        y1=crop_y,
+                        x2=crop_x + video_width,
+                        y2=crop_y + video_height,
+                    )
+                    if clip.size != (video_width, video_height):
+                        clip = CompositeVideoClip([clip.with_position("center")], size=(video_width, video_height))
                     
             shuffle_side = random.choice(["left", "right", "top", "bottom"])
             if transition_value in (None, VideoTransitionMode.none.value):
@@ -690,8 +805,9 @@ def combine_videos(
                 shuffle_transition = random.choice(transition_funcs)
                 clip = shuffle_transition(clip)
 
-            if clip.duration > max_clip_duration:
-                clip = clip.subclipped(0, max_clip_duration)
+            effective_clip_cap = 8.0 if planned_clip_durations else max_clip_duration
+            if clip.duration > effective_clip_cap:
+                clip = clip.subclipped(0, effective_clip_cap)
                 
             # wirte clip to temp file
             clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
@@ -968,6 +1084,81 @@ def subtitle_font_supports_text(font_path: str, text: str) -> bool:
     return _subtitle_font_supports_sample(font_path, sample)
 
 
+def _rh_essendon_watermark_clip(
+    assets: RHBrandingAssets, duration: float, video_width: int, video_height: int
+) -> ImageClip:
+    """Create a small, aspect-ratio-preserving watermark with clear space."""
+    watermark_width = max(56, int(video_width * 0.082))
+    clear_space = max(42, int(video_width * 0.055))
+    watermark = ImageClip(assets.watermark, transparent=True).resized(
+        width=watermark_width
+    )
+    return watermark.with_duration(duration).with_position(
+        (video_width - watermark.w - clear_space, clear_space)
+    )
+
+
+def _rh_essendon_contact_clips(
+    assets: RHBrandingAssets,
+    start: float,
+    duration: float,
+    video_width: int,
+    contact_card: str | None = RH_CONTACT_CARD_JAYDEN,
+) -> list[TextClip]:
+    """Add contact details below the supplied closing logo without altering it."""
+    center_x = "center"
+    if rh_essendon_contact_card_type(contact_card) == RH_CONTACT_CARD_OFFICE:
+        office_name, office_phone = rh_essendon_contact_card_content(contact_card)
+        # This card is independently centred, rather than leaving the personal
+        # card's headshot/contact layout with elements removed.
+        return [
+            TextClip(
+                text=office_name,
+                font=assets.headline_font,
+                font_size=max(46, int(video_width * 0.052)),
+                color=_RH_CHARCOAL,
+                margin=(0, 14),
+            ).with_start(start).with_duration(duration).with_position((center_x, 1270)),
+            TextClip(
+                text=office_phone,
+                font=assets.secondary_font,
+                font_size=max(38, int(video_width * 0.044)),
+                color=_RH_GOLD,
+                margin=(0, 14),
+            ).with_start(start).with_duration(duration).with_position((center_x, 1405)),
+        ]
+
+    title = TextClip(
+        text=_RH_BRAND_CONTACT[0],
+        font=assets.headline_font,
+        font_size=max(46, int(video_width * 0.058)),
+        color=_RH_CHARCOAL,
+        margin=(0, 12),
+    ).with_start(start).with_duration(duration).with_position((center_x, 1210))
+    role = TextClip(
+        text=_RH_BRAND_CONTACT[1],
+        font=assets.secondary_font,
+        font_size=max(25, int(video_width * 0.029)),
+        color=_RH_CHARCOAL,
+        margin=(0, 12),
+    ).with_start(start).with_duration(duration).with_position((center_x, 1300))
+    phone = TextClip(
+        text=_RH_BRAND_CONTACT[2],
+        font=assets.secondary_font,
+        font_size=max(31, int(video_width * 0.037)),
+        color=_RH_GOLD,
+        margin=(0, 12),
+    ).with_start(start).with_duration(duration).with_position((center_x, 1410))
+    office = TextClip(
+        text=_RH_BRAND_CONTACT[3],
+        font=assets.secondary_font,
+        font_size=max(25, int(video_width * 0.029)),
+        color=_RH_CHARCOAL,
+        margin=(0, 12),
+    ).with_start(start).with_duration(duration).with_position((center_x, 1490))
+    return [title, role, phone, office]
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -985,6 +1176,19 @@ def generate_video(
     """
     aspect = VideoAspect(params.video_aspect)
     video_width, video_height = aspect.to_resolution()
+    branding_assets = rh_essendon_branding_assets()
+    branding_enabled = should_apply_rh_essendon_branding(params)
+    if branding_enabled and not _rh_essendon_assets_are_available(branding_assets):
+        # Branding resources are local project assets. A partial installation
+        # must not make an otherwise valid video job fail.
+        logger.warning("R&H Essendon branding assets are incomplete; skipping branding")
+        branding_enabled = False
+
+    subtitle_params = params
+    if branding_enabled:
+        # Keep the brand treatment local to this render; WebUI/API selections
+        # are not silently mutated for subsequent tasks.
+        subtitle_params = rh_essendon_subtitle_params(params, branding_assets)
 
     logger.info(f"generating video: {video_width} x {video_height}")
     logger.info(f"  ① video: {video_path}")
@@ -998,10 +1202,12 @@ def generate_video(
     output_dir = os.path.dirname(output_file)
 
     font_path = ""
-    if params.subtitle_enabled:
-        if not params.font_name:
-            params.font_name = "STHeitiMedium.ttc"
-        font_path = os.path.join(utils.font_dir(), params.font_name)
+    if subtitle_params.subtitle_enabled:
+        if not subtitle_params.font_name:
+            subtitle_params = subtitle_params.model_copy(
+                update={"font_name": "STHeitiMedium.ttc"}
+            )
+        font_path = os.path.join(utils.font_dir(), subtitle_params.font_name)
         if os.name == "nt":
             font_path = font_path.replace("\\", "/")
 
@@ -1011,24 +1217,24 @@ def generate_video(
         # 兼容历史参数：API 里 `text_background_color` 既可能是布尔值，
         # 也可能是实际颜色字符串。统一在这里归一化，避免把 True/False
         # 直接传给 TextClip 后出现不可预期的渲染结果。
-        if isinstance(params.text_background_color, bool):
-            return "#000000" if params.text_background_color else None
-        return params.text_background_color
+        if isinstance(subtitle_params.text_background_color, bool):
+            return "#000000" if subtitle_params.text_background_color else None
+        return subtitle_params.text_background_color
 
     def create_text_clip(subtitle_item):
-        params.font_size = int(params.font_size)
-        params.stroke_width = int(params.stroke_width)
+        subtitle_font_size = int(subtitle_params.font_size)
+        subtitle_stroke_width = int(subtitle_params.stroke_width)
         phrase = subtitle_item[1]
         max_width = video_width * 0.9
         bg_color = resolve_subtitle_background_color()
         rounded_bg_enabled = bool(
-            getattr(params, "rounded_subtitle_background", False) and bg_color
+            getattr(subtitle_params, "rounded_subtitle_background", False) and bg_color
         )
         has_subtitle_background = bool(bg_color)
         # 圆角背景按文字真实宽度生成，左右留白应更克制；旧矩形背景仍保留
         # 较大的安全边距，避免历史配置中的长字幕贴边或被裁切。
-        padding_ratio = 0.4 if rounded_bg_enabled else 0.6
-        pad_x = int(params.font_size * padding_ratio) if has_subtitle_background else 0
+        padding_ratio = 0.35 if rounded_bg_enabled and branding_enabled else (0.4 if rounded_bg_enabled else 0.6)
+        pad_x = int(subtitle_font_size * padding_ratio) if has_subtitle_background else 0
         # 字幕背景需要给文字左右留出明确内边距。先从可用宽度中扣除
         # padding 再换行，避免长英文或大字号刚好撑满 90% 视频宽度后，
         # 文字贴到背景框边缘，看起来像被裁切。普通矩形背景和圆角背景
@@ -1038,13 +1244,26 @@ def generate_video(
             phrase,
             max_width=text_max_width,
             font=font_path,
-            fontsize=params.font_size,
+            fontsize=subtitle_font_size,
         )
-        interline = int(params.font_size * 0.25)
+        # Brand captions must remain readable and never occupy a third line.
+        # Prefer a modest, deterministic size reduction to truncating speech.
+        if branding_enabled:
+            while wrapped_txt.count("\n") + 1 > 2 and subtitle_font_size > 44:
+                subtitle_font_size -= 2
+                pad_x = int(subtitle_font_size * padding_ratio) if has_subtitle_background else 0
+                text_max_width = max(1, int(max_width) - 2 * pad_x)
+                wrapped_txt, txt_height = wrap_text(
+                    phrase,
+                    max_width=text_max_width,
+                    font=font_path,
+                    fontsize=subtitle_font_size,
+                )
+        interline = int(subtitle_font_size * (0.18 if branding_enabled else 0.25))
         line_count = wrapped_txt.count("\n") + 1
-        vertical_padding = int(params.font_size * 0.35)
+        vertical_padding = int(subtitle_font_size * 0.35)
         text_clip_margin_y = max(
-            int(params.font_size * 0.3), int(params.stroke_width * 2)
+            int(subtitle_font_size * 0.3), int(subtitle_stroke_width * 2)
         )
         # MoviePy 在 `method=label` 下会自动收缩文本框高度，遇到多行字幕、
         # 描边或背景色时，容易把最后一行的下半部分裁掉。这里显式传入
@@ -1056,7 +1275,7 @@ def generate_video(
             # 圆角背景需要贴合文字宽度，而不是沿用 90% 视频宽度。这里先用
             # PIL 测量最长一行文字，再加水平内边距，避免短字幕出现过宽底板。
             try:
-                font = ImageFont.truetype(font_path, params.font_size)
+                font = ImageFont.truetype(font_path, subtitle_font_size)
                 text_w = max(
                     int(font.getbbox(line)[2] - font.getbbox(line)[0])
                     for line in wrapped_txt.split("\n")
@@ -1068,15 +1287,15 @@ def generate_video(
                 text_w = int(max_width)
 
             box_w = max(1, min(int(max_width), text_w + 2 * pad_x))
-            radius = max(8, int(params.font_size * 0.4))
+            radius = max(8, int(subtitle_font_size * 0.4))
             text_clip = TextClip(
                 text=wrapped_txt,
                 font=font_path,
-                font_size=params.font_size,
-                color=params.text_fore_color,
+                font_size=subtitle_font_size,
+                color=subtitle_params.text_fore_color,
                 bg_color=None,
-                stroke_color=params.stroke_color,
-                stroke_width=params.stroke_width,
+                stroke_color=subtitle_params.stroke_color,
+                stroke_width=subtitle_stroke_width,
                 interline=interline,
                 size=(box_w, None),
                 text_align="center",
@@ -1103,11 +1322,11 @@ def generate_video(
             text_clip = TextClip(
                 text=wrapped_txt,
                 font=font_path,
-                font_size=params.font_size,
-                color=params.text_fore_color,
+                font_size=subtitle_font_size,
+                color=subtitle_params.text_fore_color,
                 bg_color=None,
-                stroke_color=params.stroke_color,
-                stroke_width=params.stroke_width,
+                stroke_color=subtitle_params.stroke_color,
+                stroke_width=subtitle_stroke_width,
                 interline=interline,
                 size=(int(max_width), None),
                 text_align="center",
@@ -1134,11 +1353,11 @@ def generate_video(
             _clip = TextClip(
                 text=wrapped_txt,
                 font=font_path,
-                font_size=params.font_size,
-                color=params.text_fore_color,
+                font_size=subtitle_font_size,
+                color=subtitle_params.text_fore_color,
                 bg_color=None,
-                stroke_color=params.stroke_color,
-                stroke_width=params.stroke_width,
+                stroke_color=subtitle_params.stroke_color,
+                stroke_width=subtitle_stroke_width,
                 interline=interline,
                 size=size,
                 text_align="center",
@@ -1147,16 +1366,17 @@ def generate_video(
         _clip = _clip.with_start(subtitle_item[0][0])
         _clip = _clip.with_end(subtitle_item[0][1])
         _clip = _clip.with_duration(duration)
-        if params.subtitle_position == "bottom":
-            _clip = _clip.with_position(("center", video_height * 0.95 - _clip.h))
-        elif params.subtitle_position == "top":
+        if subtitle_params.subtitle_position == "bottom":
+            bottom_safe_edge = 0.84 if branding_enabled else 0.95
+            _clip = _clip.with_position(("center", video_height * bottom_safe_edge - _clip.h))
+        elif subtitle_params.subtitle_position == "top":
             _clip = _clip.with_position(("center", video_height * 0.05))
-        elif params.subtitle_position == "custom":
+        elif subtitle_params.subtitle_position == "custom":
             # Ensure the subtitle is fully within the screen bounds
             margin = 10  # Additional margin, in pixels
             max_y = video_height - _clip.h - margin
             min_y = margin
-            custom_y = (video_height - _clip.h) * (params.custom_position / 100)
+            custom_y = (video_height - _clip.h) * (subtitle_params.custom_position / 100)
             custom_y = max(
                 min_y, min(custom_y, max_y)
             )  # Constrain the y value within the valid range
@@ -1174,6 +1394,7 @@ def generate_video(
         )
         voice_source_clip = clip_stack.enter_context(AudioFileClip(audio_path))
         video_clip = source_video_clip
+        main_video_duration = source_video_clip.duration
         audio_clip = voice_source_clip.with_effects(
             [afx.MultiplyVolume(params.voice_volume)]
         )
@@ -1182,7 +1403,7 @@ def generate_video(
             return TextClip(
                 text=text,
                 font=font_path,
-                font_size=params.font_size,
+                font_size=subtitle_params.font_size,
             )
 
         if subtitle_path and os.path.exists(subtitle_path):
@@ -1199,6 +1420,73 @@ def generate_video(
                 text_clips.append(clip)
             video_clip = CompositeVideoClip([video_clip, *text_clips])
             clip_stack.callback(video_clip.close)
+
+        branding_intro_duration = 0.0
+        closing_duration = 0.0
+        if branding_enabled:
+            # The supplied opening has alpha. Its embedded audio is omitted so
+            # narration and music start cleanly with the main footage.
+            opening_source = clip_stack.enter_context(
+                _open_video_clip_quietly(
+                    branding_assets.opening, audio=False, has_mask=True
+                )
+            )
+            # The supplied ampersand has completed its essential reveal by the
+            # two-second mark (verified against the local asset). Keep that
+            # full reveal while avoiding an unnecessarily long opening.
+            branding_intro_duration = min(2.0, opening_source.duration)
+            opening_background = ColorClip(
+                size=(video_width, video_height), color=_hex_to_rgb(_RH_CHARCOAL)
+            ).with_duration(branding_intro_duration)
+            opening_mark = opening_source.subclipped(0, branding_intro_duration).resized(width=int(video_width * 0.82)).with_position(
+                ("center", "center")
+            )
+            opening_clip = CompositeVideoClip(
+                [opening_background, opening_mark], size=(video_width, video_height)
+            )
+            clip_stack.callback(opening_clip.close)
+
+            closing_source = clip_stack.enter_context(
+                _open_video_clip_quietly(branding_assets.closing, audio=False)
+            )
+            closing_duration = min(3.0, closing_source.duration)
+            closing_start = branding_intro_duration + main_video_duration
+            watermark_clip = _rh_essendon_watermark_clip(
+                branding_assets,
+                duration=main_video_duration,
+                video_width=video_width,
+                video_height=video_height,
+            ).with_start(branding_intro_duration)
+            contact_clips = _rh_essendon_contact_clips(
+                branding_assets,
+                start=closing_start,
+                duration=closing_duration,
+                video_width=video_width,
+                contact_card=getattr(params, "rh_final_contact_card", RH_CONTACT_CARD_JAYDEN),
+            )
+            logger.info(
+                "R&H final contact card: {}",
+                rh_essendon_contact_card_type(
+                    getattr(params, "rh_final_contact_card", RH_CONTACT_CARD_JAYDEN)
+                ),
+            )
+            branded_video_clip = CompositeVideoClip(
+                [
+                    opening_clip,
+                    video_clip.with_start(branding_intro_duration),
+                    watermark_clip,
+                    closing_source.subclipped(0, closing_duration).with_start(closing_start),
+                    *contact_clips,
+                ],
+                size=(video_width, video_height),
+            )
+            clip_stack.callback(branded_video_clip.close)
+            video_clip = branded_video_clip
+
+        # Voice-over begins after the opening. BGM below receives the same
+        # offset independently, so both retain their original relative timing.
+        if branding_enabled:
+            audio_clip = audio_clip.with_start(branding_intro_duration)
 
         bgm_enabled = bgm_service.should_use_bgm(
             params.bgm_type, params.bgm_volume
@@ -1223,20 +1511,83 @@ def generate_video(
                     bgm_file=params.bgm_file,
                 )
             )
+            # R&H selections are intentionally constrained to the direct
+            # resource/songs entry selected at task creation, never uploads or
+            # archived/nested music with a coincidentally matching filename.
+            if (
+                branding_enabled
+                and getattr(params, "rh_background_music_enabled", False)
+                and getattr(params, "rh_background_music_filename", "")
+            ):
+                candidate = os.path.join(utils.song_dir(), params.rh_background_music_filename)
+                if os.path.basename(candidate) == params.rh_background_music_filename and os.path.isfile(candidate):
+                    bgm_file = candidate
+                else:
+                    bgm_file = ""
         bgm_mix_succeeded = True
         if bgm_file:
             try:
+                rh_music = bool(
+                    branding_enabled
+                    and getattr(params, "rh_background_music_enabled", False)
+                )
+                final_music_duration = (
+                    branding_intro_duration + main_video_duration + closing_duration
+                    if rh_music else main_video_duration
+                )
                 bgm_effects = [
                     afx.MultiplyVolume(params.bgm_volume),
-                    afx.AudioFadeOut(3),
+                    afx.AudioFadeIn(0.9 if rh_music else 1),
                 ]
                 # 服务内解析的随机/自定义音乐可能比成片短，需要循环铺满；任务层
                 # 通过 override 传入的文件表示提供商已经完成时长适配。这里依据
                 # 文件来源决定是否循环，避免今后每增加一个提供商都修改名称白名单。
                 if bgm_file_override is None:
-                    bgm_effects.append(afx.AudioLoop(duration=video_clip.duration))
+                    # Branded videos carry the local instrumental bed through
+                    # the closing card, while the opening remains silent.
+                    bgm_effects.append(
+                        afx.AudioLoop(duration=final_music_duration)
+                    )
                 bgm_source_clip = clip_stack.enter_context(AudioFileClip(bgm_file))
                 bgm_clip = bgm_source_clip.with_effects(bgm_effects)
+                # A provider override may be longer than the branded render. Trim
+                # every source after looping so the composite audio cannot extend
+                # beyond opening + narration + closing, and so the two-second
+                # fade is anchored to the actual final frame.
+                bgm_clip = bgm_clip.with_duration(final_music_duration)
+                if rh_music:
+                    # Equivalent sidechain envelope: reduce music by 5 dB only
+                    # for the known narration interval, with MoviePy's smooth
+                    # compositing retaining the unchanged subtitle timeline.
+                    bgm_clip = bgm_clip.with_effects(
+                        [
+                            afx.MultiplyVolume(
+                                10 ** (-5 / 20),
+                                start_time=branding_intro_duration,
+                                end_time=branding_intro_duration + main_video_duration,
+                            )
+                        ]
+                    )
+                if rh_music and closing_duration:
+                    # Lift the instrumental bed from 20% to ~26% only once
+                    # narration has ended and the closing card is on screen.
+                    bgm_clip = bgm_clip.with_effects(
+                        [
+                            afx.MultiplyVolume(
+                                1.3,
+                                start_time=branding_intro_duration + main_video_duration,
+                                end_time=final_music_duration,
+                            )
+                        ]
+                    )
+                # This fade must be last: AudioLoop/trim has now produced the
+                # complete opening + narration + closing music timeline. A
+                # pre-loop fade would occur at the source track boundary and
+                # leave the final output ending abruptly.
+                if rh_music:
+                    bgm_clip = bgm_clip.with_effects([afx.AudioFadeOut(2.0)])
+                else:
+                    bgm_clip = bgm_clip.with_effects([afx.AudioFadeOut(3)])
                 audio_clip = CompositeAudioClip([audio_clip, bgm_clip])
             except Exception:
                 bgm_mix_succeeded = False

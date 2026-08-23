@@ -12,6 +12,7 @@ from uuid import uuid4
 from loguru import logger
 
 from app.models import const
+from app.utils import runtime_paths
 
 
 def get_response(status: int, data: Any = None, message: str = ""):
@@ -86,60 +87,56 @@ def normalize_clip_speed(value, default: float = 1.0) -> float:
 
 
 def root_dir():
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    """Return the immutable application root in either development or packaged mode."""
+
+    return str(runtime_paths.code_root())
 
 
 def storage_dir(sub_dir: str = "", create: bool = False):
-    d = os.path.join(root_dir(), "storage")
+    directory = runtime_paths.projects_dir(create=create)
     if sub_dir:
-        d = os.path.join(d, sub_dir)
-    if create and not os.path.exists(d):
-        os.makedirs(d)
-
-    return d
+        directory = directory / sub_dir
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    return str(directory)
 
 
 def resource_dir(sub_dir: str = ""):
-    d = os.path.join(root_dir(), "resource")
+    directory = runtime_paths.resource_root()
     if sub_dir:
-        d = os.path.join(d, sub_dir)
-    return d
+        directory = directory / sub_dir
+    return str(directory)
 
 
 def task_dir(sub_dir: str = ""):
-    d = os.path.join(storage_dir(), "tasks")
+    directory = runtime_paths.projects_dir(create=True) / "tasks"
     if sub_dir:
-        d = os.path.join(d, sub_dir)
-    if not os.path.exists(d):
-        os.makedirs(d)
-    return d
+        directory = directory / sub_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    return str(directory)
 
 
 def font_dir(sub_dir: str = ""):
-    d = resource_dir("fonts")
+    directory = runtime_paths.resource_root() / "fonts"
     if sub_dir:
-        d = os.path.join(d, sub_dir)
-    if not os.path.exists(d):
-        os.makedirs(d)
-    return d
+        directory = directory / sub_dir
+    return str(directory)
 
 
 def song_dir(sub_dir: str = ""):
-    d = resource_dir("songs")
+    directory = runtime_paths.music_dir(create=True)
     if sub_dir:
-        d = os.path.join(d, sub_dir)
-    if not os.path.exists(d):
-        os.makedirs(d)
-    return d
+        directory = directory / sub_dir
+    if sub_dir:
+        directory.mkdir(parents=True, exist_ok=True)
+    return str(directory)
 
 
 def public_dir(sub_dir: str = ""):
-    d = resource_dir("public")
+    directory = runtime_paths.resource_root() / "public"
     if sub_dir:
-        d = os.path.join(d, sub_dir)
-    if not os.path.exists(d):
-        os.makedirs(d)
-    return d
+        directory = directory / sub_dir
+    return str(directory)
 
 
 def get_ffmpeg_binary() -> str:
@@ -158,6 +155,10 @@ def get_ffmpeg_binary() -> str:
     3. imageio-ffmpeg 依赖提供的内置二进制；
     4. 字符串 "ffmpeg" 兜底，交给 subprocess 在运行时暴露更具体错误。
     """
+    packaged_ffmpeg = runtime_paths.ffmpeg_path()
+    if packaged_ffmpeg:
+        return str(packaged_ffmpeg)
+
     configured_ffmpeg = os.environ.get("IMAGEIO_FFMPEG_EXE")
     if configured_ffmpeg:
         return configured_ffmpeg
@@ -176,6 +177,18 @@ def get_ffmpeg_binary() -> str:
         logger.warning(f"failed to resolve bundled ffmpeg binary: {str(exc)}")
 
     return "ffmpeg"
+
+
+def get_ffprobe_binary() -> str:
+    """Resolve FFprobe from the packaged runtime before falling back to PATH."""
+
+    packaged_ffprobe = runtime_paths.ffprobe_path()
+    if packaged_ffprobe:
+        return str(packaged_ffprobe)
+    configured_ffprobe = os.environ.get("TURBO_VIDEO_FFPROBE")
+    if configured_ffprobe:
+        return configured_ffprobe
+    return shutil.which("ffprobe") or "ffprobe"
 
 
 def run_in_background(func, *args, **kwargs):

@@ -758,7 +758,7 @@ def _search_videos_with_cache(
 
 def download_videos(
     task_id: str,
-    search_terms: List[str],
+    search_terms: List[str | dict],
     source: str = "pexels",
     video_aspect: VideoAspect = VideoAspect.portrait,
     video_concat_mode: VideoConcatMode = VideoConcatMode.random,
@@ -899,12 +899,35 @@ def _download_videos_by_script_order(
     valid_video_urls = set()
     found_duration = 0.0
 
-    for search_term in search_terms:
+    for term in search_terms:
+        beat = term if isinstance(term, dict) else {"query": term}
+        search_term = str(beat.get("query") or "").strip()
+        fallback_query = str(beat.get("fallback_query") or "").strip()
+        alternate_queries = [str(query).strip() for query in beat.get("alternates", []) if str(query).strip()]
+        if not search_term:
+            continue
         video_items = search_videos(
             search_term=search_term,
             minimum_duration=max_clip_duration,
             video_aspect=video_aspect,
         )
+        for alternate_query in alternate_queries:
+            if video_items:
+                break
+            video_items = search_videos(
+                search_term=alternate_query,
+                minimum_duration=max_clip_duration,
+                video_aspect=video_aspect,
+            )
+        if not video_items and fallback_query and fallback_query != search_term:
+            logger.info(
+                f"no exact material match for {search_term!r}; trying property fallback"
+            )
+            video_items = search_videos(
+                search_term=fallback_query,
+                minimum_duration=max_clip_duration,
+                video_aspect=video_aspect,
+            )
         logger.info(f"found {len(video_items)} videos for '{search_term}'")
 
         term_items = []

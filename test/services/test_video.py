@@ -46,6 +46,10 @@ class _FakeMoviePyClip:
     def with_effects(self, _effects):
         return self
 
+    def with_duration(self, duration):
+        self.duration = duration
+        return self
+
     def with_audio(self, _audio):
         return self.with_audio_result
 
@@ -56,8 +60,15 @@ class TestVideoService(unittest.TestCase):
         self.test_img_path = os.path.join(resources_dir, "1.png")
         vd._runtime_disabled_video_codecs.clear()
         vd._ffmpeg_encoder_exists.cache_clear()
+        # Existing final-render tests exercise the established unbranded path.
+        # Branding-specific behaviour is covered in its focused test module.
+        self.branding_patch = patch.object(
+            vd, "should_apply_rh_essendon_branding", return_value=False
+        )
+        self.branding_patch.start()
 
     def tearDown(self):
+        self.branding_patch.stop()
         config.app.clear()
         config.app.update(self.original_app_config)
         vd._runtime_disabled_video_codecs.clear()

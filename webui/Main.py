@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import html
 import json
 import math
@@ -20,12 +21,18 @@ import streamlit as st
 from loguru import logger
 from streamlit_tour import Tour
 
-# WebUI 作为独立入口运行时，需要让项目根目录优先于第三方依赖，
-# 避免依赖中的同名 app 包遮蔽 MoneyPrinterTurbo 自己的 app 包。
-root_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-if root_dir in sys.path:
-    sys.path.remove(root_dir)
-sys.path.insert(0, root_dir)
+# WebUI may run from a PyInstaller bundle where a third-party package named
+# ``app`` would otherwise shadow MoneyPrinterTurbo's own first-party package.
+# The native launcher verifies and exports this physical bundle location before
+# starting Streamlit. Direct development execution keeps its repository root.
+_bundled_first_party_root = os.environ.get("TURBO_VIDEO_FIRST_PARTY_ROOT", "")
+if _bundled_first_party_root and (Path(_bundled_first_party_root) / "app" / "__init__.py").is_file():
+    _first_party_import_root = _bundled_first_party_root
+else:
+    _first_party_import_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+if _first_party_import_root in sys.path:
+    sys.path.remove(_first_party_import_root)
+sys.path.insert(0, _first_party_import_root)
 
 from app.config import config
 from app.models import const
@@ -47,6 +54,7 @@ from app.services import (
     cache_manager,
     llm,
     loomloom,
+    rh_essendon,
     video,
     voice,
     webui_task,
@@ -57,35 +65,47 @@ from app.services import state as sm
 from app.services import task as tm
 from app.services import version_checker
 from app.utils.logging_utils import configure_terminal_logger
-from app.utils import utils
+from app.utils import runtime_paths, utils
+
+root_dir = str(runtime_paths.code_root())
+
+_desktop_menu_items = {
+    "About": "# Turbo Video\nCreate polished R&H Essendon portrait social videos from a simple brief, with "
+    "narration, visual planning, branded subtitles, contact-card selection, and optional background music.",
+}
+if not runtime_paths.is_packaged():
+    _desktop_menu_items["Report a bug"] = "https://github.com/harry0703/MoneyPrinterTurbo/issues"
 
 st.set_page_config(
-    page_title="MoneyPrinterTurbo",
-    page_icon="🤖",
+    page_title="Turbo Video",
+    page_icon="🎬",
     layout="wide",
     initial_sidebar_state="auto",
-    menu_items={
-        "Report a bug": "https://github.com/harry0703/MoneyPrinterTurbo/issues",
-        "About": "# MoneyPrinterTurbo\nSimply provide a topic or keyword for a video, and it will "
-        "automatically generate the video copy, video materials, video subtitles, "
-        "and video background music before synthesizing a high-definition short "
-        "video.\n\nhttps://github.com/harry0703/MoneyPrinterTurbo",
-    },
+    menu_items=_desktop_menu_items,
 )
+
+# The packaged desktop shell supplies a per-launch token.  Development mode has
+# no token, so direct Streamlit development use remains unchanged.
+_desktop_launch_token = os.environ.get("TURBO_VIDEO_LAUNCH_TOKEN")
+if _desktop_launch_token:
+    _provided_token = str(st.query_params.get("turbo_token", ""))
+    if not hmac.compare_digest(_provided_token, _desktop_launch_token):
+        st.error("Turbo Video must be opened from its desktop application.")
+        st.stop()
 
 
 # Streamlit 1.59 会在页面右上角默认展示 Deploy、skills nudge 等平台入口。
 # MoneyPrinterTurbo 是面向终端用户的本地工具，这些入口会造成顶部大块空白，
 # 也会让新用户误以为需要安装额外组件。这里统一隐藏 Streamlit 平台工具栏，
 # 并压缩主容器顶部留白，只保留项目自己的标题、语言选择和业务设置区域。
-style_file = Path(__file__).with_name("styles.css")
+style_file = runtime_paths.webui_root() / "styles.css"
 streamlit_style = f"<style>{style_file.read_text(encoding='utf-8')}</style>"
 st.markdown(streamlit_style, unsafe_allow_html=True)
 # 定义资源目录
-font_dir = os.path.join(root_dir, "resource", "fonts")
-song_dir = os.path.join(root_dir, "resource", "songs")
-i18n_dir = os.path.join(root_dir, "webui", "i18n")
-config_file = os.path.join(root_dir, "webui", ".streamlit", "webui.toml")
+font_dir = utils.font_dir()
+song_dir = utils.song_dir()
+i18n_dir = str(runtime_paths.webui_root() / "i18n")
+config_file = str(runtime_paths.webui_root() / ".streamlit" / "webui.toml")
 # 语言列表必须在会话状态初始化前可用，首次访问时才能把浏览器 locale 映射到
 # 项目真正支持的语言；自动识别结果只进入当前会话，不修改全局配置。
 locales = utils.load_locales(i18n_dir)
@@ -428,6 +448,9 @@ def _initialize_session_state():
             max_length=elevenlabs_music_service.MAX_PROMPT_LENGTH,
         ),
         "subtitle_enabled_checkbox": _saved_ui_bool("subtitle_enabled", True),
+        "rh_essendon_branding_checkbox": _saved_ui_bool(
+            "rh_essendon_branding", True
+        ),
         "stroke_color_picker": _saved_ui_color("stroke_color", "#000000"),
         "stroke_width_slider": _saved_ui_number(
             "stroke_width", 1.5, 0.0, 10.0
@@ -1303,16 +1326,22 @@ def _render_brand(available_update: str | None = None):
             f'aria-label="{update_label}" title="{update_label}">'
             f"{update_label}</a>"
         )
+    version = runtime_paths.APP_VERSION if runtime_paths.is_packaged() else str(config.project_version)
+    if runtime_paths.is_packaged():
+        version_markup = f'<span class="mpt-brand__version">v{html.escape(version)}</span>'
+    else:
+        version_markup = (
+            '<a class="mpt-brand__version" '
+            'href="https://github.com/harry0703/MoneyPrinterTurbo" '
+            'target="_blank" rel="noopener noreferrer" '
+            'aria-label="Open MoneyPrinterTurbo on GitHub" '
+            f'title="Open project on GitHub">v{html.escape(version)}</a>'
+        )
     st.markdown(
         f"""
         <h1 class="mpt-brand">
-            <span class="mpt-brand__name">MoneyPrinterTurbo</span>
-            <a class="mpt-brand__version"
-               href="https://github.com/harry0703/MoneyPrinterTurbo"
-               target="_blank"
-               rel="noopener noreferrer"
-               aria-label="Open MoneyPrinterTurbo on GitHub"
-               title="Open project on GitHub">v{html.escape(str(config.project_version))}</a>
+            <span class="mpt-brand__name">Turbo Video</span>
+            {version_markup}
             {update_link}
         </h1>
         """,
@@ -1343,11 +1372,14 @@ def _render_top_bar():
         )
 
     with brand_col:
-        update_snapshot = version_checker.poll_available_update(config.project_version)
-        if update_snapshot.complete:
-            _render_brand(update_snapshot.available_version)
+        if runtime_paths.is_packaged():
+            _render_brand()
         else:
-            _render_pending_version_check()
+            update_snapshot = version_checker.poll_available_update(config.project_version)
+            if update_snapshot.complete:
+                _render_brand(update_snapshot.available_version)
+            else:
+                _render_pending_version_check()
 
     with actions_col:
         with st.container(
@@ -4766,6 +4798,18 @@ def _render_subtitle_settings(panel, params):
         with st.container(border=True):
             st.write(tr("Subtitle Settings"))
             st.session_state.setdefault(
+                "rh_essendon_branding_checkbox",
+                _saved_ui_bool("rh_essendon_branding", True),
+            )
+            params.rh_essendon_branding = st.checkbox(
+                "R&H Essendon Branding",
+                key="rh_essendon_branding_checkbox",
+                help="Adds the Raine & Horne Essendon portrait opening, watermark, branded subtitles and closing card.",
+            )
+            _set_runtime_config(
+                "ui", "rh_essendon_branding", params.rh_essendon_branding
+            )
+            st.session_state.setdefault(
                 "subtitle_enabled_checkbox",
                 _saved_ui_bool(
                     "subtitle_enabled",
@@ -5330,6 +5374,17 @@ def _render_application():
     if restore_applied or restore_succeeded:
         st.success(tr("Task Configuration Loaded"))
 
+    workflow_mode = st.radio(
+        "Workflow",
+        options=("R&H Essendon Simple Mode", "Advanced Mode"),
+        horizontal=True,
+        key="workflow_mode",
+        help="Simple Mode uses the same generation pipeline with R&H Essendon portrait defaults. Advanced Mode keeps every MoneyPrinterTurbo control.",
+    )
+    if workflow_mode == "R&H Essendon Simple Mode":
+        _render_rh_essendon_simple_mode()
+        return
+
     with st.container(key="main_settings_grid"):
         panel = st.columns(4)
     left_panel = panel[0]
@@ -5362,6 +5417,131 @@ def _render_application():
     # 如果后台任务正在使用配置，配置层会在任务结束时自动应用并落盘最新值。
     if not generation_submitted:
         _save_runtime_config()
+
+
+def _render_rh_essendon_simple_mode():
+    """The concise front door; Advanced Mode remains fully unchanged below."""
+    st.subheader("Raine & Horne Essendon social-video creator")
+    st.caption("Portrait 1080 × 1920 · branded subtitles · visual closing card · background music included")
+    params = VideoParams(video_subject="")
+    params.rh_essendon_simple_mode = True
+    params.rh_essendon_branding = True
+    params.video_aspect = VideoAspect.portrait.value
+    params.video_source = "pexels"
+    params.video_concat_mode = VideoConcatMode.sequential.value
+    params.match_materials_to_script = True
+    params.video_clip_duration = 3
+    params.video_count = 1
+    params.subtitle_enabled = True
+    params.subtitle_position = "bottom"
+    params.font_name = "Raine&HorneRegular.ttf"
+    params.text_fore_color = "#FFFFFF"
+    params.text_background_color = "#2B2B2B"
+    params.rounded_subtitle_background = True
+    params.stroke_color = "#2B2B2B"
+    params.stroke_width = 0
+    params.font_size = 60
+    simple_music_enabled = st.checkbox("Background music", value=True, key="rh_simple_music_enabled")
+    params.bgm_type = "custom" if simple_music_enabled else ""
+    params.bgm_file = ""
+    params.bgm_volume = 0.20 if simple_music_enabled else 0
+    params.rh_background_music_enabled = simple_music_enabled
+    # Reuse the saved Hannah Jayne ElevenLabs voice without reading or exposing
+    # credentials. If it is not configured, keep generation usable for free.
+    saved_voice = str(config.ui.get("voice_name", "") or "")
+    has_hannah = voice.is_elevenlabs_voice(saved_voice) and "hannah jayne" in saved_voice.lower()
+    params.voice_name = saved_voice if has_hannah else "en-AU-NatashaNeural-Female"
+    params.voice_rate = 1.10
+    params.rh_elevenlabs_voice_settings = (
+        {"stability": 0.40, "similarity_boost": 0.75, "style": 0.35, "use_speaker_boost": True}
+        if has_hannah else None
+    )
+    params.voice_volume = 1.0
+    params.video_language = "en-AU"
+
+    params.video_subject = st.text_area(
+        "Topic or property-content idea",
+        placeholder="For example: Three small fixes that help a seller prepare for Saturday inspections",
+        height=104,
+        key="rh_simple_topic",
+    ).strip()
+    columns = st.columns(3)
+    with columns[0]:
+        params.rh_content_type = st.selectbox(
+            "Content type", rh_essendon.CONTENT_TYPES, key="rh_simple_content_type"
+        )
+    with columns[1]:
+        params.rh_target_seconds = st.selectbox(
+            "Target length", (20, 30, 45), format_func=lambda value: f"{value} seconds", key="rh_simple_target_seconds"
+        )
+    with columns[2]:
+        params.rh_final_contact_card = st.selectbox(
+            "Final contact card",
+            options=("jayden_manno", "rh_essendon_office"),
+            format_func=lambda value: {
+                "jayden_manno": "Jayden Manno — Director and Auctioneer",
+                "rh_essendon_office": "Raine & Horne Essendon — Office",
+            }[value],
+            key="rh_simple_final_contact_card",
+        )
+    params.rh_extra_facts = st.text_area(
+        "Optional extra facts or instructions",
+        placeholder="Add only facts you want included. Market updates will use only facts written here.",
+        height=96,
+        key="rh_simple_extra_facts",
+    ).strip()
+    params.paragraph_number = 1
+    params.video_script_prompt = rh_essendon.simple_script_prompt(
+        params.rh_content_type, params.rh_target_seconds, params.rh_extra_facts
+    )
+    params.custom_system_prompt = rh_essendon.RH_SIMPLE_SYSTEM_PROMPT
+    st.caption(
+        "Voice: Hannah Jayne — Recommended (ElevenLabs multilingual v2)"
+        if has_hannah
+        else "Voice: Natasha — Free fallback (Hannah Jayne is not available in the saved configuration)"
+    )
+    st.info("Contact details remain visual on the closing card; the phone number is never added to the narration.")
+
+    if st.button("Prepare narration and visual plan", key="rh_prepare_plan", use_container_width=True):
+        if not params.video_subject:
+            st.error("Please add a topic or property-content idea first.")
+        else:
+            script = llm.generate_script(
+                video_subject=params.video_subject,
+                language=params.video_language,
+                paragraph_number=1,
+                video_script_prompt=params.video_script_prompt,
+                custom_system_prompt=params.custom_system_prompt,
+            )
+            if script and not script.startswith("Error:"):
+                st.session_state["rh_simple_script"] = script
+                st.session_state["rh_simple_plan"] = rh_essendon.generate_semantic_visual_plan(
+                    script, params.rh_content_type, params.rh_target_seconds
+                )
+            else:
+                st.error("Could not prepare the narration. Check the configured LLM in Advanced Mode.")
+
+    prepared_script = str(st.session_state.get("rh_simple_script", "") or "").strip()
+    prepared_plan = st.session_state.get("rh_simple_plan", [])
+    if prepared_script:
+        with st.expander("Narration and visual plan", expanded=True):
+            params.video_script = st.text_area(
+                "Narration", value=prepared_script, height=210, key="rh_simple_script_editor"
+            ).strip()
+            edited_plan = []
+            for index, beat in enumerate(prepared_plan, start=1):
+                st.caption(f"Beat {index}: {beat.get('narration', '')}")
+                edited = dict(beat)
+                edited["query"] = st.text_input(
+                    f"Pexels query {index}", value=str(beat.get("query", "")), key=f"rh_simple_query_{index}"
+                ).strip()
+                edited_plan.append(edited)
+            params.rh_visual_plan = edited_plan
+            params.video_terms = edited_plan
+            st.session_state["rh_simple_script"] = params.video_script
+            st.session_state["rh_simple_plan"] = edited_plan
+            st.caption("If you substantially edit the narration, prepare the plan again so each visual beat stays aligned.")
+            _render_generation_controls(params, [], None, None, VOICE_MODE_TTS)
 
 
 _render_application()

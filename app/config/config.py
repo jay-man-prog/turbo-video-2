@@ -11,9 +11,10 @@ import toml
 from loguru import logger
 
 from app import __version__
+from app.utils import runtime_paths
 
-root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-config_file = f"{root_dir}/config.toml"
+root_dir = str(runtime_paths.code_root())
+config_file = str(runtime_paths.config_path())
 _CONTAINER_CGROUP_MARKERS = ("docker", "containerd", "kubepods", "libpod", "podman")
 _DOCKER_HOST_GATEWAY_NAME = "host.docker.internal"
 _config_save_lock = threading.RLock()
@@ -458,18 +459,28 @@ def _load_toml_config(config_path: str):
 
 
 def load_config():
-    # fix: IsADirectoryError: [Errno 21] Is a directory: '/MoneyPrinterTurbo/config.toml'
+    """Load configuration from the desktop-aware writable location.
+
+    A directory at the configuration-file path is treated as a setup error. The
+    previous recursive deletion behaviour is deliberately not retained: a
+    desktop application must never remove an unexpected user directory.
+    """
+
     if os.path.isdir(config_file):
-        shutil.rmtree(config_file)
+        raise IsADirectoryError(f"Turbo Video configuration path is a directory: {os.path.basename(config_file)}")
 
+    runtime_paths.config_path(create_parent=True)
     if not os.path.isfile(config_file):
-        example_file = f"{root_dir}/config.example.toml"
-        if os.path.isfile(example_file):
+        example_file = runtime_paths.example_config_path()
+        if example_file.is_file():
             shutil.copyfile(example_file, config_file)
-            logger.info("copy config.example.toml to config.toml")
+            try:
+                os.chmod(config_file, 0o600)
+            except OSError:
+                pass
+            logger.info("created application configuration from the bundled example")
 
-    logger.info(f"load config from file: {config_file}")
-
+    logger.info("loading application configuration")
     return _load_toml_config(config_file)
 
 
@@ -516,7 +527,7 @@ def save_config():
             fd, temp_path = tempfile.mkstemp(
                 prefix=".config-",
                 suffix=".toml.tmp",
-                dir=root_dir,
+                dir=os.path.dirname(config_file),
             )
             with os.fdopen(fd, mode="w", encoding="utf-8") as f:
                 f.write(serialized_config)

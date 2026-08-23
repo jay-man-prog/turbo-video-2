@@ -2,6 +2,7 @@ import asyncio
 import base64
 import os
 import shutil
+import subprocess
 import unittest
 import sys
 import tempfile
@@ -1258,13 +1259,39 @@ class TestElevenLabsVoice(unittest.TestCase):
             out_path = f.name
 
         try:
-            result = vs.elevenlabs_tts("Hello world", "abc123", out_path)
+            result = vs.elevenlabs_tts(
+                "Hello world", "abc123", out_path,
+                voice_settings={"stability": 0.45, "similarity_boost": 0.75, "style": 0.25, "use_speaker_boost": True},
+            )
             self.assertIsNotNone(result)
             self.assertTrue(hasattr(result, "subs"))
             self.assertTrue(hasattr(result, "offset"))
+            settings = mock_post.call_args.kwargs["json"]["voice_settings"]
+            self.assertEqual(settings["stability"], 0.45)
+            self.assertEqual(settings["style"], 0.25)
+            self.assertTrue(settings["use_speaker_boost"])
         finally:
             if os.path.exists(out_path):
                 os.remove(out_path)
+
+    def test_pitch_preserving_tempo_is_applied_once_and_keeps_sample_rate(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            audio_file = str(Path(tmp_dir) / "voice.mp3")
+            ffmpeg = utils.get_ffmpeg_binary()
+            subprocess.run(
+                [ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "2", audio_file],
+                check=True, capture_output=True,
+            )
+            before = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nokey=1:noprint_wrappers=1", audio_file], text=True))
+            sample_rate_before = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "default=nokey=1:noprint_wrappers=1", audio_file], text=True).strip()
+
+            self.assertTrue(vs.apply_pitch_preserving_speed(audio_file, 1.10))
+
+            after = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nokey=1:noprint_wrappers=1", audio_file], text=True))
+            sample_rate_after = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "default=nokey=1:noprint_wrappers=1", audio_file], text=True).strip()
+            self.assertLess(after, before)
+            self.assertAlmostEqual(after, before / 1.10, delta=0.08)
+            self.assertEqual(sample_rate_after, sample_rate_before)
 
     @patch("app.services.voice.config")
     def test_elevenlabs_tts_no_api_key(self, mock_config):
