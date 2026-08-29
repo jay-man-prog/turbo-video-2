@@ -6,8 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -49,16 +48,6 @@ def validation_exception_handler(request: Request, e: RequestValidationError):
     )
 
 
-class RendererAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        expected = os.getenv("RENDERER_SERVICE_TOKEN", "").strip()
-        if expected and path not in {"/", "/ping", "/health", "/docs", "/openapi.json", "/redoc"} and path.startswith("/api/"):
-            if request.headers.get("authorization", "") != f"Bearer {expected}":
-                return PlainTextResponse("Unauthorized", status_code=401)
-        return await call_next(request)
-
-
 def get_application() -> FastAPI:
     """Initialize FastAPI application.
 
@@ -74,7 +63,6 @@ def get_application() -> FastAPI:
         lifespan=application_lifespan,
     )
     instance.include_router(root_api_router)
-    instance.add_middleware(RendererAuthMiddleware)
     instance.add_exception_handler(HttpException, exception_handler)
     instance.add_exception_handler(RequestValidationError, validation_exception_handler)
     return instance
