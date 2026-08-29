@@ -603,7 +603,77 @@ def search_videos_coverr(
     return []
 
 
+def search_videos_huggingface(
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> List[MaterialInfo]:
+    """Generate a short b-roll clip from a search term using Hugging Face inference."""
+    token = config.app.get("huggingface_api_key") or config.app.get("hf_token")
+    if not token:
+        raise ValueError("huggingface_api_key is not configured")
+
+    try:
+        from huggingface_hub import InferenceClient
+    except ImportError as exc:
+        raise RuntimeError(
+            "Hugging Face support requires the optional huggingface_hub package"
+        ) from exc
+
+    model = str(config.app.get("huggingface_model", "genmo/mochi-1-preview"))
+    provider = str(config.app.get("huggingface_provider", "replicate"))
+    timeout = float(config.app.get("huggingface_timeout", 900))
+    width, height = VideoAspect(video_aspect).to_resolution()
+    orientation = "vertical 9:16" if height > width else "horizontal 16:9" if width > height else "square 1:1"
+    prompt = (
+        f"Cinematic realistic b-roll footage about: {search_term}. "
+        f"Create a clean {orientation} composition, natural motion, one coherent shot, "
+        "no subtitles, no logos, no watermark, no text, suitable for a narrated social video."
+    )
+    cache_dir = utils.storage_dir("cache_videos")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_key = utils.md5(f"hf|{model}|{provider}|{prompt}")
+    output_path = os.path.join(cache_dir, f"hf-{cache_key}.mp4")
+    if os.path.isfile(output_path) and os.path.getsize(output_path) > 0:
+        return [MaterialInfo(
+            provider="huggingface",
+            url=output_path,
+            duration=max(int(minimum_duration), 1),
+            source_info={
+                "provider": "huggingface",
+                "search_term": search_term,
+                "asset_id": cache_key,
+                "source_page": f"https://huggingface.co/{model}",
+                "rendition": {"width": width, "height": height},
+            },
+        )]
+
+    logger.info(
+        f"generating Hugging Face video: term={search_term!r}, model={model}, provider={provider}"
+    )
+    client = InferenceClient(provider=provider, api_key=token, timeout=timeout)
+    video_bytes = client.text_to_video(prompt, model=model)
+    temporary_path = f"{output_path}.tmp-{os.getpid()}"
+    with open(temporary_path, "wb") as output_file:
+        output_file.write(video_bytes)
+    os.replace(temporary_path, output_path)
+    return [MaterialInfo(
+        provider="huggingface",
+        url=output_path,
+        duration=max(int(minimum_duration), 1),
+        source_info={
+            "provider": "huggingface",
+            "search_term": search_term,
+            "asset_id": cache_key,
+            "source_page": f"https://huggingface.co/{model}",
+            "rendition": {"width": width, "height": height},
+        },
+    )]
+
+
 def save_video(video_url: str, save_dir: str = "") -> str:
+    if os.path.isfile(video_url):
+        return video_url
     if not save_dir:
         save_dir = utils.storage_dir("cache_videos")
 
@@ -768,7 +838,10 @@ def download_videos(
 ) -> List[str]:
     provider = "pexels"
     remote_search_videos = search_videos_pexels
-    if source == "pixabay":
+    if source == "huggingface":
+        provider = "huggingface"
+        remote_search_videos = search_videos_huggingface
+    elif source == "pixabay":
         provider = "pixabay"
         remote_search_videos = search_videos_pixabay
     elif source == "coverr":

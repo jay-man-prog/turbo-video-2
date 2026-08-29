@@ -2522,7 +2522,26 @@ def _render_settings_dialog():
                 key="coverr_api_keys_input",
             )
             _save_material_api_keys("coverr_api_keys", coverr_api_key)
-
+            huggingface_api_key = st.text_input(
+                "Hugging Face API Token",
+                value=str(config.app.get("huggingface_api_key", "") or ""),
+                type="password",
+                key="huggingface_api_key_input",
+                help="A fine-grained token with permission to make calls to Inference Providers.",
+            )
+            _set_runtime_config("app", "huggingface_api_key", huggingface_api_key)
+            huggingface_model = st.text_input(
+                "Hugging Face Video Model",
+                value=str(config.app.get("huggingface_model", "genmo/mochi-1-preview") or "genmo/mochi-1-preview"),
+                key="huggingface_model_input",
+            )
+            _set_runtime_config("app", "huggingface_model", huggingface_model.strip())
+            huggingface_provider = st.text_input(
+                "Hugging Face Inference Provider",
+                value=str(config.app.get("huggingface_provider", "replicate") or "replicate"),
+                key="huggingface_provider_input",
+            )
+            _set_runtime_config("app", "huggingface_provider", huggingface_provider.strip())
     _save_runtime_config()
 
 
@@ -3284,6 +3303,7 @@ def _render_video_settings(panel, params):
                 (tr("Pexels"), "pexels"),
                 (tr("Pixabay"), "pixabay"),
                 (tr("Coverr"), "coverr"),
+                (tr("Hugging Face AI Video"), "huggingface"),
                 (tr("Shengsuan Cloud AI Video"), "loomloom"),
                 (tr("Local file"), "local"),
             ]
@@ -5129,6 +5149,7 @@ def _render_generation_controls(
             "pexels",
             "pixabay",
             "coverr",
+            "huggingface",
             "loomloom",
             "local",
         ]:
@@ -5156,7 +5177,12 @@ def _render_generation_controls(
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Coverr API Key"))
             st.stop()
-
+        if params.video_source == "huggingface" and not (
+            config.app.get("huggingface_api_key") or config.app.get("hf_token")
+        ):
+            _remove_active_generation_task(task_id)
+            st.error("Please enter the Hugging Face API token")
+            st.stop()
         loomloom_video_request = None
         if params.video_source == "loomloom":
             current_batch, current_signature = _current_loomloom_video_quote_context(
