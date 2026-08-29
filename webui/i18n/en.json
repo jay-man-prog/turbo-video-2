@@ -188,6 +188,7 @@
     "Restore Default Subtitle Settings": "Restore Subtitle Defaults",
     "Default Subtitle Settings Restored": "Default subtitle settings restored",
     "Generate Video": "Generate Video",
+    "Refresh for New Video": "Refresh for New Video",
     "Video Script and Subject Cannot Both Be Empty": "Video Subject and Video Script cannot both be empty",
     "Generating Video": "Generating video, please wait...",
     "Start Generating Video": "Start Generating Video",

@@ -188,6 +188,7 @@
     "Restore Default Subtitle Settings": "恢复默认字幕设置",
     "Default Subtitle Settings Restored": "已恢复默认字幕设置",
     "Generate Video": "生成视频",
+    "Refresh for New Video": "刷新并生成新视频",
     "Video Script and Subject Cannot Both Be Empty": "视频主题 和 视频文案，不能同时为空",
     "Generating Video": "正在生成视频，请稍候...",
     "Start Generating Video": "开始生成视频",

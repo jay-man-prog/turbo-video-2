@@ -1629,6 +1629,18 @@ def _render_generation_task_snapshot(task_id, task):
         return
 
     st.success(tr("Video Generation Completed"))
+    refresh_button = getattr(st, "button", None)
+    if refresh_button and refresh_button(
+        tr("Refresh for New Video"),
+        key=f"refresh_new_video_{task_id}",
+        icon=":material/refresh:",
+        use_container_width=True,
+    ):
+        # Completed work remains in Task Manager.  This only returns the
+        # current browser session to the form for the next generation.
+        st.session_state["current_generation_task_id"] = ""
+        st.session_state.pop("handled_generation_task_id", None)
+        st.rerun()
     for warning in task.get("warnings") or []:
         if isinstance(warning, Mapping) and warning.get("code") == "sonilo_bgm_failed":
             st.warning(
