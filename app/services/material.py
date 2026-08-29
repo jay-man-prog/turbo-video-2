@@ -888,6 +888,10 @@ def download_videos(
             video_aspect=video_aspect,
         )
         logger.info(f"found {len(video_items)} videos for '{search_term}'")
+        # Search APIs and the 24-hour search cache commonly return stable ordering.
+        # Shuffle candidates before deduplication so each generation can choose a
+        # different subset/order while preserving the existing provider pipeline.
+        random.shuffle(video_items)
 
         for item in video_items:
             if item.url not in valid_video_urls:
@@ -1002,6 +1006,9 @@ def _download_videos_by_script_order(
                 video_aspect=video_aspect,
             )
         logger.info(f"found {len(video_items)} videos for '{search_term}'")
+        # Keep narration/scenes in order, but do not always choose the provider's
+        # first result when the search cache returns a stable ordering.
+        random.shuffle(video_items)
 
         term_items = []
         for item in video_items:

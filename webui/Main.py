@@ -70,14 +70,14 @@ from app.utils import runtime_paths, utils
 root_dir = str(runtime_paths.code_root())
 
 _desktop_menu_items = {
-    "About": "# Turbo Video\nCreate polished R&H Essendon portrait social videos from a simple brief, with "
+    "About": "# Turbo Video Manus\nCreate polished R&H Essendon portrait social videos from a simple brief, with "
     "narration, visual planning, branded subtitles, contact-card selection, and optional background music.",
 }
 if not runtime_paths.is_packaged():
     _desktop_menu_items["Report a bug"] = "https://github.com/harry0703/MoneyPrinterTurbo/issues"
 
 st.set_page_config(
-    page_title="Turbo Video",
+    page_title="Turbo Video Manus",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="auto",
@@ -90,7 +90,7 @@ _desktop_launch_token = os.environ.get("TURBO_VIDEO_LAUNCH_TOKEN")
 if _desktop_launch_token:
     _provided_token = str(st.query_params.get("turbo_token", ""))
     if not hmac.compare_digest(_provided_token, _desktop_launch_token):
-        st.error("Turbo Video must be opened from its desktop application.")
+        st.error("Turbo Video Manus must be opened from its desktop application.")
         st.stop()
 
 
@@ -1340,7 +1340,7 @@ def _render_brand(available_update: str | None = None):
     st.markdown(
         f"""
         <h1 class="mpt-brand">
-            <span class="mpt-brand__name">Turbo Video</span>
+            <span class="mpt-brand__name">Turbo Video Manus</span>
             {version_markup}
             {update_link}
         </h1>
