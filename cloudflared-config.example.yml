@@ -1,0 +1,8 @@
+# Rename to config.yml after installing cloudflared and creating a tunnel.
+tunnel: YOUR_TUNNEL_ID
+credentials-file: /home/YOUR_USER/.cloudflared/YOUR_TUNNEL_ID.json
+
+ingress:
+  - hostname: turbo-video-renderer.example.com
+    service: http://localhost:8080
+  - service: http_status:404
